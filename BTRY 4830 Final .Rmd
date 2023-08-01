@@ -1,0 +1,384 @@
+---
+title: "BTRY 4830 Final"
+author: "Emily Hur"
+date: "5/17/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+library(magrittr) 
+library(dplyr)    
+library(data.table)
+library(ggplot2)
+library(MASS)
+```
+
+
+
+```{r}
+#1A and 1B
+citrulline_phenotypes=read.csv('2022QG_citrulline.csv', header=FALSE)
+hist(citrulline_phenotypes$V1, xlab = 'Phenotype', main = 'Citrulline Level Phenotype Frequencies')
+
+
+```
+
+
+```{r}
+#1C and 1D 
+kidney_phenotypes=read.csv('2022QG_kidneydisease.csv', header=FALSE)
+hist(kidney_phenotypes$V1, xlab = 'Phenotype', main = 'Kidney Disease Phenotype Frequencies')
+
+```
+
+```{r}
+#1E
+cat(paste0("The sample size is ", nrow(citrulline_phenotypes)))
+```
+```{r}
+#2A and 2B
+genotypes=read.csv('2022QG_genotypes.csv', header=FALSE)
+cat(paste0("There are ", ncol(genotypes), " SNPs"))
+```
+
+```{r}
+#2C and 2D
+MAF <- apply(genotypes, 2, function(a) sum(a)/362)
+hist(MAF, xlab = 'Minor Allele Frequency', main = 'Histogram of MAFs')
+```
+
+```{r}
+#3a
+xa_matrix=genotypes-1
+xd_matrix<-1 - 2*abs(xa_matrix)
+lin_reg_no_covar=function(xa_input, xd_input, pheno_input){
+  num_samples <- length(xa_input)
+  x <- cbind(rep(1,num_samples), xa_input, xd_input)
+  MLE_beta <- ginv(t(x) %*% x) %*% t(x) %*% pheno_input
+  y <- x %*% MLE_beta
+  SSM <- sum((y - mean(pheno_input))^2)
+  SSE <- sum((pheno_input - y)^2)
+  num_betas=ncol(x)
+  df1<-num_betas-1
+  df2<-num_samples-num_betas
+  MSM <- SSM / df1 
+  MSE <- SSE / df2  
+  Fstatistic <- MSM / MSE
+  pvalue <- pf(Fstatistic, df1, df2,lower.tail = FALSE)
+  return(pvalue)
+}
+dimension=ncol(xa_matrix)
+pval_matrix <- rep(0,dimension)
+for(index in 1:dimension){
+  pval_matrix[index] <- lin_reg_no_covar(xa_matrix[,index], xd_matrix[,index],citrulline_phenotypes$V1)
+}
+```
+
+```{r}
+#3B
+to_plot <- data.frame(index = 1:length(pval_matrix), pval = pval_matrix)
+ggplot(to_plot, aes(index, -log10(pval_matrix))) + geom_point() +
+  labs(x = 'Index',
+       y = '-log10 p-val',
+       title = 'Manhattan Plot- Citrulline Level',
+       subtitle = 'No Covariate')
+```
+
+```{r}
+#3C
+observed_pvals=sort(pval_matrix)
+expected_pvals = qunif(seq(0, 1, length.out = length(observed_pvals) + 2), min = 0, max = 1)
+expected_pvals = expected_pvals[expected_pvals != 0 & expected_pvals != 1]
+qq_df = data.frame(observed = -log10(observed_pvals), expected = -log10(expected_pvals))
+
+ggplot(qq_df, aes(x = expected, y = observed)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = 'red') +
+  labs(x = '-log10 Expected p-val',
+       y = '-log10 Observed p-val',
+       title = 'QQ Plot- Citrulline Level',
+       subtitle = 'No Covariate')
+```
+```{r}
+#4a
+
+W_calc <- function(gamma_inv){
+		W <- diag(as.vector(gamma_inv * (1- gamma_inv)))
+    return(W)
+}
+
+gamma_inv_calc <- function(X_mx, beta_t){
+  K <- X_mx %*% beta_t
+  gamma_inv <- exp(K)/(1+exp(K))
+  return(gamma_inv)
+}
+beta_update <- function(X_mx, W, Y, gamma_inv, beta){
+  beta_up <- beta + ginv(t(X_mx)%*%W%*%X_mx)%*%t(X_mx)%*%(Y-gamma_inv)
+	return(beta_up)
+}
+dev_calc <- function(Y, gamma_inv){
+    deviance <- 2*( sum(Y[Y==1]*log(Y[Y==1]/gamma_inv[Y==1])) + sum((1-Y[Y==0])*log((1-Y[Y==0])/(1-gamma_inv[Y==0]))) )  
+    return(deviance)
+}
+
+loglik_calc <- function(Y, gamma_inv){
+    loglik <- sum(Y*log(gamma_inv)+(1-Y)*log(1-gamma_inv))
+    return(loglik)
+}
+
+logistic.IRLS.recursive <- function(Y, X_mx, beta_t, dpt1, gamma_inv,
+                                    iter, d.stop.th = 1e-6, it.max = 100){
+    # create empty matrix W
+		W <- W_calc(gamma_inv)
+    
+		beta_t <- beta_update(X_mx, W, Y, gamma_inv, beta_t)
+		
+		#update gamma since it's a function of beta
+		gamma_inv <- gamma_inv_calc(X_mx, beta_t)
+		
+		#calculate new deviance
+		dt <- dev_calc(Y, gamma_inv)
+		absD <- abs(dt - dpt1)
+		
+		if(absD < d.stop.th | iter > it.max) {
+			#cat("Convergence at iteration:", i, "at threshold:", d.stop.th, "\n")
+			logl <- loglik_calc(Y, gamma_inv)
+			return(list(beta_t,logl))
+		}	else {
+		  return(logistic.IRLS.recursive(Y, X_mx, beta_t, dt, gamma_inv, iter+1,
+		                                 d.stop.th = 1e-6, it.max = 100))
+		}
+}
+
+logistic.IRLS.pval.recursive <- function(Xa,Xd,Y, beta.initial.vec = c(0,0,0),
+                                         d.stop.th = 1e-6, it.max = 100) {
+  #Initialize
+  beta_t <- beta.initial.vec
+	dt <- 0
+	
+  X_mx <- cbind(rep(1,length(Y)), Xa, Xd)
+  gamma_inv <- gamma_inv_calc(X_mx, beta_t)
+	h1 <- logistic.IRLS.recursive(Y, X_mx, beta_t, dt, gamma_inv,
+	                              1, d.stop.th = 1e-6, it.max = 100)
+	
+	X_mx <- cbind(rep(1,length(Y)), rep(0,length(Y)),rep(0,length(Y)))
+  gamma_inv <- gamma_inv_calc(X_mx, beta_t)
+	h0 <- logistic.IRLS.recursive(Y, X_mx, beta_t, dt, gamma_inv,
+	                              1, d.stop.th = 1e-6, it.max = 100)
+
+	LRT <- 2*h1[[2]]-2*h0[[2]] #likelihood ratio test statistic
+  pval <- pchisq(LRT, 2, lower.tail = F)
+	return(pval)
+}
+```
+
+
+```{r}
+#4a
+pval_matrix3 <- rep(0,dimension)
+for(index in 1:dimension){
+  pval_matrix3[index] <- logistic.IRLS.pval.recursive(xa_matrix[,index], xd_matrix[,index],kidney_phenotypes$V1)
+}
+```
+
+```{r}
+#4B
+to_plot2 <- data.frame(index = 1:length(pval_matrix3), pval = pval_matrix3)
+ggplot(to_plot2, aes(index, -log10(pval_matrix3))) + geom_point() +
+  labs(x = 'Index',
+       y = '-log10 p-val',
+       title = 'Manhattan Plot- Kidney Disease',
+       subtitle = 'No Covariate')
+```
+
+```{r}
+#4C
+observed_pvals2=sort(pval_matrix3)
+expected_pvals2 = qunif(seq(0, 1, length.out = length(observed_pvals2) + 2), min = 0, max = 1)
+expected_pvals2 = expected_pvals2[expected_pvals2 != 0 & expected_pvals2 != 1]
+qq_df2 = data.frame(observed = -log10(observed_pvals2), expected = -log10(expected_pvals2))
+
+ggplot(qq_df2, aes(x = expected, y = observed)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = 'red') +
+  labs(x = '-log10 Expected p-val',
+       y = '-log10 Observed p-val',
+       title = 'QQ Plot- Kidney Disease',
+       subtitle = 'No Covariate')
+```
+
+#5
+Both QQ plots don't look like a line or a line with a tail, so they don't fall under the ideal GWAS or null GWAS cases. This suggests the model doesn't fit the data well and any significant p-values can't be interpreted. 
+
+```{r}
+#6a
+geno_pca <- prcomp(genotypes)
+```
+
+
+```{r}
+#6b
+plot(geno_pca$x[,1], geno_pca$x[,2], main="Genotype PC projections", xlab="PC1", ylab="PC2")
+
+```
+
+```{r}
+#7a
+lin_reg_with_covar=function(xa_input, xd_input, pheno_input, covar_input){
+  num_samples <- length(xa_input)
+  h0_matrix = cbind(1, covar_input) 
+  MLE_h0 = ginv(t(h0_matrix) %*% h0_matrix) %*% t(h0_matrix) %*% pheno_input 
+  h1_matrix <- cbind(rep(1,num_samples), xa_input, xd_input, covar_input)
+  MLE_h1 = ginv(t(h1_matrix) %*% h1_matrix) %*% t(h1_matrix) %*% pheno_input
+  y0 = h0_matrix %*% MLE_h0 
+  y1 = h1_matrix %*% MLE_h1 
+  SSE_h0 = sum((pheno_input - y0)^2) 
+  SSE_h1 = sum((pheno_input - y1)^2)
+  df1 = ncol(h1_matrix) - ncol(h0_matrix)  
+  df2 = num_samples - ncol(h1_matrix) 
+  num = (SSE_h0 - SSE_h1)/df1
+  den = SSE_h1/df2
+  Fstatistic = num/den
+  pval = pf(Fstatistic, df1, df2, lower.tail = FALSE)
+  return(pval)
+}
+covariates=data.frame(pc1=geno_pca$x[,1], pc2=geno_pca$x[,2])
+covariates=as.matrix(covariates)
+pval_matrix_covar <- rep(0,dimension)
+for(index in 1:dimension){
+  pval_matrix_covar[index] <- lin_reg_with_covar(xa_matrix[,index], xd_matrix[,index],citrulline_phenotypes$V1, covariates)}
+```
+
+
+```{r}
+#7b
+to_plot3 <- data.frame(index = 1:length(pval_matrix_covar), pval = pval_matrix_covar)
+ggplot(to_plot3, aes(index, -log10(pval_matrix_covar))) + geom_point() +
+  labs(x = 'Index',
+       y = '-log10 p-val',
+       title = 'Manhattan Plot- Citrulline Level',
+       subtitle = 'Covariates PC1 and PC2')
+```
+```{r}
+#7c
+observed_pvals3=sort(pval_matrix_covar)
+expected_pvals3 = qunif(seq(0, 1, length.out = length(observed_pvals3) + 2), min = 0, max = 1)
+expected_pvals3 = expected_pvals3[expected_pvals3 != 0 & expected_pvals3 != 1]
+qq_df3 = data.frame(observed = -log10(observed_pvals3), expected = -log10(expected_pvals3))
+
+ggplot(qq_df3, aes(x = expected, y = observed)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = 'red') +
+  labs(x = '-log10 Expected p-val',
+       y = '-log10 Observed p-val',
+       title = 'QQ Plot- Citrulline Level',
+       subtitle = 'Covariates PC1 and PC2')
+```
+```{r}
+#8a
+logistic.IRLS.pval.recursive.covar <- function(Xa,Xd,Y, covar, beta.initial.vec = c(0,0,0,0,0),
+                                         d.stop.th = 1e-6, it.max = 100) {
+  #Initialize
+  beta_t <- beta.initial.vec
+	dt <- 0
+  X_mx <- cbind(rep(1,length(Y)), Xa, Xd, covar)
+  gamma_inv <- gamma_inv_calc(X_mx, beta_t)
+	h1 <- logistic.IRLS.recursive(Y, X_mx, beta_t, dt, gamma_inv,
+	                              1, d.stop.th = 1e-6, it.max = 100)
+	X_mx <- cbind(rep(1,length(Y)), rep(0,length(Y)),rep(0,length(Y)), covar)
+  gamma_inv <- gamma_inv_calc(X_mx, beta_t)
+	h0 <- logistic.IRLS.recursive(Y, X_mx, beta_t, dt, gamma_inv,
+	                              1, d.stop.th = 1e-6, it.max = 100)
+
+	LRT <- 2*h1[[2]]-2*h0[[2]] #likelihood ratio test statistic
+  pval <- pchisq(LRT, 2, lower.tail = F)
+	return(pval)
+}
+
+pval_matrix4 <- rep(0,dimension)
+for(index in 1:dimension){
+  pval_matrix4[index] <- logistic.IRLS.pval.recursive.covar(xa_matrix[,index], xd_matrix[,index],kidney_phenotypes$V1, covariates)
+}
+```
+
+```{r}
+#8b
+to_plot4 <- data.frame(index = 1:length(pval_matrix4), pval = pval_matrix4)
+ggplot(to_plot4, aes(index, -log10(pval_matrix4))) + geom_point() +
+  labs(x = 'Index',
+       y = '-log10 p-val',
+       title = 'Manhattan Plot- Kidney Disease',
+       subtitle = 'Covariates PC1 and PC2')
+```
+
+```{r}
+#8c
+observed_pvals4=sort(pval_matrix4)
+expected_pvals4 = qunif(seq(0, 1, length.out = length(observed_pvals4) + 2), min = 0, max = 1)
+expected_pvals4 = expected_pvals4[expected_pvals4 != 0 & expected_pvals4 != 1]
+qq_df4 = data.frame(observed = -log10(observed_pvals4), expected = -log10(expected_pvals4))
+
+ggplot(qq_df4, aes(x = expected, y = observed)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = 'red') +
+  labs(x = '-log10 Expected p-val',
+       y = '-log10 Observed p-val',
+       title = 'QQ Plot- Kidney Disease',
+       subtitle = 'Covariates PC1 and PC2')
+
+```
+#9
+Yes, both models are a good fit because both of the QQ plots appear to represent the ideal GWAS case, which means a straight line with a tail. This means for the model including the covariate, most of the p-values follow a uniform distribution, but p-values at the tail represent markers in LD with a causal polymorphism. 
+
+```{r}
+#10a
+bonferroni=.05/ncol(genotypes)
+peak1_phenotype1=pval_matrix_covar[1:15000]
+peak2_phenotype1=pval_matrix_covar[15001:32113]
+snp1_phenotype1=which.min(peak1_phenotype1)
+snp2_phenotype1=which.min(peak2_phenotype1)+15000
+pval1_phenotype1=pval_matrix_covar[snp1_phenotype1]
+pval2_phenotype1=pval_matrix_covar[snp2_phenotype1]
+#From 7b, the number of the SNP with the most significant value for each of the two peaks: 9882 and 20138
+if (pval1_phenotype1<bonferroni){
+  cat(paste0("The null hypothesis can be rejected for SNP ", snp1_phenotype1, " using a Bonferroni correction; "))}
+if (pval2_phenotype1<bonferroni){ 
+    cat(paste0("The null hypothesis can be rejected for SNP ", snp2_phenotype1, " using a Bonferroni correction"))}
+#Yes, the null hypothesis can be rejected for each of these two SNPs using a Bonferroni correction
+#The formula used to calculate this cutoff is .05/32113
+```
+
+```{r}
+#10b
+bonferroni=.05/ncol(genotypes)
+peak1_phenotype2=pval_matrix4[1:10000]
+peak2_phenotype2=pval_matrix4[10001:32113]
+snp1_phenotype2=which.min(peak1_phenotype2)
+snp2_phenotype2=which.min(peak2_phenotype2)+10000
+pval1_phenotype2=pval_matrix4[snp1_phenotype2]
+pval2_phenotype2=pval_matrix4[snp2_phenotype2]
+#From 8b, the number of the SNP with the most significant value for each of the two peaks: 4210 and 20138
+if (pval1_phenotype2<bonferroni){
+  cat(paste0("The null hypothesis can be rejected for SNP ", snp1_phenotype2, " using a Bonferroni correction; "))}
+if (pval2_phenotype2<bonferroni){ 
+    cat(paste0("The null hypothesis can be rejected for SNP ", snp2_phenotype2, " using a Bonferroni correction"))}
+#Yes, the null hypothesis can be rejected for each of these two SNPs using a Bonferroni correction
+#The formula used to calculate this cutoff is .05/32113
+```
+#10c
+This marker is in linkage disequilibrium with the causal mutation for both phenotypes, but likely doesn't represent the causal polymorphism itself. Since this position is correlated with the genotype/causal mutation for each of the two phenotypes, the causal SNPs are located within the same region but aren't necessarily exactly the same.  
+#10d
+No because all of the SNPs in the peak represent a region of the genome deemed to be significant (resolution). All of the significant SNPs for a peak are in LD and span this region, so the magnitude of significance doesn't necessarily relate to a smaller distance to the causal polymorphism.
